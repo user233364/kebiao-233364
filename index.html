@@ -145,7 +145,7 @@
   table.grid th.today{color:var(--brand);background:#fdf3f4}
   table.grid td.today{background:#fdf7f8}
   table.grid tr.odd td.corner{background:#f6f8fa}
-  /* 课程块：撑满所跨节次的行（行高由浏览器计算，不写死高度） */
+  /* ---------- 网格视图的课程块（布局由 table/rowspan 负责） ---------- */
   .gcard{
     width:100%;height:100%;min-height:38px;border-radius:8px;padding:5px 7px;
     overflow:hidden;text-align:left;display:block;color:#20242a;
@@ -154,13 +154,10 @@
   .gcard .gn{font-size:11.5px;font-weight:600;line-height:1.25;overflow:hidden}
   .gcard .gr{font-size:9.5px;opacity:.85;margin-top:2px;line-height:1.2;overflow:hidden}
   .gcard.conflict{outline:1.5px solid #e5484d}
-  .gcard .gtag{display:inline-block;font-size:9.5px;font-weight:700;padding:1px 5px;border-radius:5px;background:rgba(255,255,255,.75);margin-bottom:2px;font-variant-numeric:tabular-nums}
-
-  /* ---------- 网格视图的课程块（布局由 table/rowspan 负责） ---------- */
-  .gcard{width:100%;height:100%;border-radius:8px;padding:5px 7px;overflow:hidden;text-align:left;display:block;color:#20242a;box-shadow:0 1px 2px rgba(20,25,35,.06)}
-  .gcard .gn{font-size:11.5px;font-weight:600;line-height:1.25;overflow:hidden}
-  .gcard .gr{font-size:9.5px;opacity:.85;margin-top:2px;line-height:1.2;overflow:hidden}
-  .gcard.conflict{outline:1.5px solid #e5484d}
+  .gcard .gtag{display:inline-block;font-size:9.5px;font-weight:700;padding:1px 5px;border-radius:5px;background:rgba(255,255,255,.78);margin-bottom:2px;font-variant-numeric:tabular-nums}
+  /* 同一格内多条安排：按各自时长比例纵向分配高度 */
+  .cellstack{display:flex;flex-direction:column;gap:3px;height:100%;box-sizing:border-box}
+  .cellstack > .gcard{height:auto;min-height:0}
 
   /* 表单里的时间模式 */
   .modeseg{display:flex;gap:6px;margin-bottom:10px}
@@ -491,7 +488,7 @@
 
 const STORE_KEY = "mykebiao.v1";
 /* 构建标记：每次改动这个文件都会更新，用来确认手机上打开的是不是最新版 */
-const BUILD = "v6 表格版";
+const BUILD = "v7 占格版";
 const TERM_START_DEFAULT = "2026-09-14";
 const WEEKS_MAX = 20;
 const DAY_NAMES = ["周一","周二","周三","周四","周五","周六","周日"];
@@ -802,43 +799,49 @@ function renderGrid(){
   }
   html += '</tr></thead><tbody>';
 
-  /* 先把「被跨节课程覆盖」的格子标记出来，这些格子不输出（由 rowspan 占位） */
-  const covered = {};
-  list.forEach(c=>{
-    if(isTimed(c)) return;
-    const r = effRange(c);
-    for(let p = r[0] + 1; p <= r[1] && p <= 14; p++) covered[c.day + "-" + p] = true;
-  });
+  /* 每天：把时间上重叠的安排合并成一组；一组占一个格子，组内按各自时长分配高度 */
+  const groupsOf = {};
+  for(let d=1; d<=7; d++){
+    const items = list.filter(c=>c.day===d).map(c=>{
+      const timed = isTimed(c);
+      const r = effRange(c);
+      const ps = timed ? periodAt(toMin(c.start)) : r[0];
+      const pe = timed ? Math.max(ps, periodAt(toMin(c.end) - 1)) : r[1];
+      const mins = timed ? Math.max(15, toMin(c.end) - toMin(c.start)) : (pe - ps + 1) * 45;
+      return { c: c, ps: ps, pe: pe, flex: mins, timed: timed };
+    }).sort((a,b)=> a.ps - b.ps || b.pe - a.pe);
+    const gs = [];
+    items.forEach(it=>{
+      const g = gs[gs.length-1];
+      if(g && it.ps <= g.pe){ g.items.push(it); if(it.pe > g.pe) g.pe = it.pe; }
+      else gs.push({ ps: it.ps, pe: it.pe, items: [it] });
+    });
+    groupsOf[d] = gs;
+  }
 
-  const used = {};   // "天-节" -> 该格已占用的行数（同格多门课时堆叠）
   for(let p=1; p<=14; p++){
     html += '<tr'+(p%2?' class="odd"':'')+'><td class="corner"><b>第'+p+'节</b><small>'+PERIOD_TIME[p][0]+'<br>'+PERIOD_TIME[p][1]+'</small></td>';
     for(let d=1; d<=7; d++){
-      const key = d+"-"+p;
-      if(covered[key]){ used[key] = 1; continue; }
-      const rows = list.filter(c => c.day === d && (isTimed(c) ? timedPeriod(c) : effRange(c)[0]) === p)
-                       .sort((a,b)=>orderOf(a)-orderOf(b));
-      let cells = "";
-      rows.forEach((c,i)=>{
-        const k = colOf(c.color), timed = isTimed(c);
-        const r = effRange(c);
-        const rowN = (used[key] || 0) + i + 1;
-        cells += '<button class="gcard'+(bad.has(c.id)?" conflict":"")+'" data-id="'+c.id+'"'
-               + ' style="background:'+k.bg+';color:'+k.ink+';border-left:3px solid '+k.bar+'"'
+      const gs = groupsOf[d] || [];
+      const inside = gs.some(x => x.ps < p && x.pe >= p);   // 被上方 rowspan 覆盖
+      if(inside) continue;
+      const g = gs.find(x => x.ps === p);
+      const cls = ' class="cell'+((d===td&&todayOn)?" today":"")+'"';
+      if(!g){ html += '<td'+cls+'></td>'; continue; }
+      const span = g.pe - g.ps + 1;
+      let cards = "";
+      g.items.forEach(it=>{
+        const c = it.c, k = colOf(c.color);
+        cards += '<button class="gcard'+(bad.has(c.id)?" conflict":"")+'" data-id="'+c.id+'"'
+               + ' style="flex:'+it.flex+';background:'+k.bg+';color:'+k.ink+';border-left:3px solid '+k.bar+'"'
                + ' aria-label="'+esc(c.name)+'">'
-               + (timed ? '<span class="gtag">'+esc(timeText(c))+'</span>' : '')
+               + (it.timed ? '<span class="gtag">'+esc(timeText(c))+'</span>' : '')
                + '<span class="gn">'+esc(shortName(c))+'</span>'
                + (c.room ? '<span class="gr">'+esc(c.room)+'</span>' : '')
                + '</button>';
       });
-      if(rows.length){
-        const inSpan = Math.max.apply(null, rows.map((c)=> isTimed(c) ? 1 : Math.max(1, effRange(c)[1] - effRange(c)[0] + 1)));
-        html += '<td class="cell'+((d===td&&todayOn)?" today":"")+'"'
-              + (inSpan > 1 ? ' rowspan="'+inSpan+'"' : '')
-              + '>' + cells + '</td>';
-      }else{
-        html += '<td class="cell'+((d===td&&todayOn)?" today":"")+'"></td>';
-      }
+      html += '<td'+cls+(span > 1 ? ' rowspan="'+span+'"' : '')+'>'
+            + '<div class="cellstack">' + cards + '</div></td>';
     }
     html += '</tr>';
   }
@@ -848,12 +851,13 @@ function renderGrid(){
   if(location.hash === "#debug") showDebug(list);
 }
 
-/* 自定义时间的日程落在哪一节（用于表格定位） */
-function timedPeriod(c){
-  const a = toMin(c.start);
-  for(let p=14; p>=1; p--){ if(a >= SPAN[p][0]) return p; }
+/* 某一时刻落在第几节（用于把任意时间对齐到节次） */
+function periodAt(min){
+  for(let p=14; p>=1; p--){ if(min >= SPAN[p][0]) return p; }
   return 1;
 }
+/* 自定义时间的日程从哪一节开始 */
+function timedPeriod(c){ return periodAt(toMin(c.start)); }
 
 /* 调试：打印浏览器里真实的布局数值（在地址栏加 #debug 打开） */
 function showDebug(list){
